@@ -275,6 +275,7 @@ int main(void) {
       perror("pthread_create");
       close(new_fd);
       free(args);
+      continue;
     } else {
       pthread_detach(tid); // automatically clean up thread when its done
     }
