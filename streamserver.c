@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,25 +11,26 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <unistd.h>
 #include <time.h> // For timestamping logs
-#include<pthread.h>
+#include <unistd.h>
 
 #define PORT "3490"
 #define BACKLOG 10
 #define LOG_FILE "server.log" // Define the log file name
 
-//Since pthread_create() only allows a single void* argument , we wrap arguments into a struct
-struct thread_args{
+// Since pthread_create() only allows a single void* argument , we wrap
+// arguments into a struct
+struct thread_args {
   int client_fd;
   struct sockaddr_storage client_addr;
 };
 
-//here we are returning a generic pointer - to any data type
-//it’s returning pointers to internal fields inside the appropriate address structure
-//why use void* cause inet_ntop() expects const void *src
+// here we are returning a generic pointer - to any data type
+// it’s returning pointers to internal fields inside the appropriate address
+// structure why use void* cause inet_ntop() expects const void *src
 void *get_in_addr(struct sockaddr *sa) {
-  if (sa->sa_family == AF_INET) return &((struct sockaddr_in *)sa)->sin_addr;
+  if (sa->sa_family == AF_INET)
+    return &((struct sockaddr_in *)sa)->sin_addr;
 
   return &(((struct sockaddr_in6 *)sa)->sin6_addr);
 }
@@ -50,43 +52,117 @@ void log_message(const char *message) {
   fclose(log_file);
 }
 
-//define thread function . this will handle the request and send the response 
-void *handle_client(void* arg){
-  struct thread_args *args = (struct thread_args*)arg;
+// define thread function . this will handle the request and send the response
+void *handle_client(void *arg) {
+  struct thread_args *args = (struct thread_args *)arg;
   int client_fd = args->client_fd;
+
   char s[INET6_ADDRSTRLEN];
   inet_ntop(args->client_addr.ss_family,
-  get_in_addr((struct sockaddr*)&args->client_addr),
-  s , sizeof s);
+            get_in_addr((struct sockaddr *)&args->client_addr), s, sizeof s);
 
   char log_buffer[256];
-  snprintf(log_buffer, sizeof(log_buffer),"Handling client in thread from %s",s);
+  snprintf(log_buffer, sizeof(log_buffer), "Handling client in thread from %s", s);
   log_message(log_buffer);
 
-  //Recieve request
+  // Receive request
   char buf[2048];
-  int bytes_received = recv(client_fd,buf,sizeof(buf)-1,0);
+  int bytes_received = recv(client_fd, buf, sizeof(buf) - 1, 0);
 
-  if(bytes_received == -1){
+  if (bytes_received <= 0) {
     perror("recv");
-    log_message("recv : failed in thread");
-  }else{
-    buf[bytes_received] = '\0';
-    printf("Thread received from client : \n %s \n",buf);
+    log_message("recv failed in thread");
+    close(client_fd);
+    free(arg);
+    pthread_exit(NULL);
   }
 
-  char response[] = "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "Content-Length: 13\r\n"
-                    "\r\n"
-                    "Hello, World!";
-  if(send(client_fd,response,strlen(response),0) == -1){
-    perror("send");
-    log_message("Send failed in thread");
+  buf[bytes_received] = '\0';
+  printf("Thread received from client:\n%s\n", buf);
+
+  // Check the request path
+  char method[8], path[1024];
+  sscanf(buf, "%s %s", method, path);
+
+  if (strcmp(path, "/luffy") == 0) {
+    // Serve the image
+    FILE *image = fopen("responses/media/luffy.webp", "rb");
+    if (image == NULL) {
+      perror("image open failed");
+      close(client_fd);
+      free(arg);
+      pthread_exit(NULL);
+    }
+
+    fseek(image, 0, SEEK_END);
+    long image_size = ftell(image);
+    rewind(image);
+
+    char *image_data = malloc(image_size);
+    if (!image_data) {
+      perror("malloc failed");
+      fclose(image);
+      close(client_fd);
+      free(arg);
+      pthread_exit(NULL);
+    }
+
+    fread(image_data, 1, image_size, image);
+    fclose(image);
+
+    char image_header[256];
+    snprintf(image_header, sizeof(image_header),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: image/webp\r\n"
+             "Content-Length: %ld\r\n"
+             "Connection: close\r\n"
+             "\r\n", image_size);
+
+    send(client_fd, image_header, strlen(image_header), 0);
+    send(client_fd, image_data, image_size, 0);
+    free(image_data);
+
+  } else {
+    // Serve HTML response
+    const char *features = "<h1>Simple Server</h1>"
+                          "<ul>"
+                           "<li>Multi-threaded request handling using pthreads</li>"
+                           "<li>Logging with timestamps</li>"
+                           "<li>Serves plain text and images</li>"
+                           "<li>Error handling with logs</li>"
+                           "</ul>";
+
+    const char *body_template = "<html><head><title>Simple Server</title></head><body>%s</body></html>";
+
+    size_t body_len = strlen(body_template) + strlen(features) + 1;
+    char *body = malloc(body_len);
+    if (!body) {
+      perror("malloc failed");
+      close(client_fd);
+      free(arg);
+      pthread_exit(NULL);
+    }
+
+    sprintf(body, body_template, features);
+    log_message(body);
+
+    char header[2048];
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: text/html\r\n"
+             "Content-Length: %ld\r\n"
+             "Connection: close\r\n"
+             "\r\n", strlen(body));
+    log_message(header);
+
+    send(client_fd, header, strlen(header), 0);
+    send(client_fd, body, strlen(body), 0);
+
+    free(body);
   }
 
-  // close(client_fd);
-  free(arg); 
+  close(client_fd);
+  free(arg);
   pthread_exit(NULL);
 }
 
@@ -117,7 +193,8 @@ int main(void) {
   if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
     fprintf(stderr, "get addrinfo : %s \n ", gai_strerror(rv));
     char log_buffer[256];
-    snprintf(log_buffer, sizeof(log_buffer), "getaddrinfo: %s", gai_strerror(rv));
+    snprintf(log_buffer, sizeof(log_buffer), "getaddrinfo: %s",
+             gai_strerror(rv));
     log_message(log_buffer);
     return 1;
   }
@@ -189,42 +266,17 @@ int main(void) {
     inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr),
               s, sizeof s);
 
-    /*
-     ---- Print connector's details on my server -----
-    */
-    printf("Client connected \n");
-    char log_buffer[256];
-    snprintf(log_buffer, sizeof(log_buffer), "Client connected from %s", s);
-    log_message(log_buffer);
-
-    char buf[2048];
-    int bytes_received = recv(new_fd, buf, sizeof(buf) - 1, 0);
-
-    if (bytes_received == -1) {
-      perror("recv");
-      log_message("recv: failed");
-    } else {
-      buf[bytes_received] = '\0'; // null terminate
-      printf("Request from client : \n %s \n", buf);
-      snprintf(log_buffer, sizeof(log_buffer), "Received %d bytes from client: %s", bytes_received, buf);
-      log_message(log_buffer);
-    }
-
-    /*
-     ---- Print connector's details logic ends here ----
-    */
-
     struct thread_args *args = malloc(sizeof(struct thread_args));
     args->client_fd = new_fd;
     args->client_addr = their_addr;
 
-    pthread_t tid ;
-    if(pthread_create(&tid,NULL,handle_client,args)!=0){
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, handle_client, args) != 0) {
       perror("pthread_create");
       close(new_fd);
       free(args);
-    }else{
-      pthread_detach(tid); //automatically clean up thread when its done
+    } else {
+      pthread_detach(tid); // automatically clean up thread when its done
     }
   }
 
