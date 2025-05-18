@@ -22,7 +22,7 @@ Logging with timestamps is supported for easy debugging and monitoring.
 
 ---
 
-### 🔧 Compile
+### Compile
 
 ```bash
 gcc streamserver.c -o streamserver
