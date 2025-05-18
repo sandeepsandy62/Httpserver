@@ -6,15 +6,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/_pthread/_pthread_t.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <time.h> // For timestamping logs
+#include<pthread.h>
 
 #define PORT "3490"
 #define BACKLOG 10
 #define LOG_FILE "server.log" // Define the log file name
+
+//Since pthread_create() only allows a single void* argument , we wrap arguments into a struct
+struct thread_args{
+  int client_fd;
+  struct sockaddr_storage client_addr;
+};
 
 //here we are returning a generic pointer - to any data type
 //it’s returning pointers to internal fields inside the appropriate address structure
@@ -41,6 +49,47 @@ void log_message(const char *message) {
   fprintf(log_file, "[%s] %s\n", timestamp, message);
   fclose(log_file);
 }
+
+//define thread function . this will handle the request and send the response 
+void *handle_client(void* arg){
+  struct thread_args *args = (struct thread_args*)arg;
+  int client_fd = args->client_fd;
+  char s[INET6_ADDRSTRLEN];
+  inet_ntop(args->client_addr.ss_family,
+  get_in_addr((struct sockaddr*)&args->client_addr),
+  s , sizeof s);
+
+  char log_buffer[256];
+  snprintf(log_buffer, sizeof(log_buffer),"Handling client in thread from %s",s);
+  log_message(log_buffer);
+
+  //Recieve request
+  char buf[2048];
+  int bytes_received = recv(client_fd,buf,sizeof(buf)-1,0);
+
+  if(bytes_received == -1){
+    perror("recv");
+    log_message("recv : failed in thread");
+  }else{
+    buf[bytes_received] = '\0';
+    printf("Thread received from client : \n %s \n",buf);
+  }
+
+  char response[] = "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 13\r\n"
+                    "\r\n"
+                    "Hello, World!";
+  if(send(client_fd,response,strlen(response),0) == -1){
+    perror("send");
+    log_message("Send failed in thread");
+  }
+
+  // close(client_fd);
+  free(arg); 
+  pthread_exit(NULL);
+}
+
 
 int main(void) {
   log_message("Server started.");
@@ -165,28 +214,18 @@ int main(void) {
      ---- Print connector's details logic ends here ----
     */
 
-    char response[] = "HTTP/1.1 200 OK\r\n"
-                      "Content-Type: text/plain\r\n"
-                      "Content-Length:  13\r\n"
-                      "\r\n"
-                      "Hello, World!";
+    struct thread_args *args = malloc(sizeof(struct thread_args));
+    args->client_fd = new_fd;
+    args->client_addr = their_addr;
 
-    if (send(new_fd, response, strlen(response), 0) == -1) {
-      perror("send");
-      log_message("send: failed");
-    } else {
-      log_message("Sent response to client: Hello, World!");
+    pthread_t tid ;
+    if(pthread_create(&tid,NULL,handle_client,args)!=0){
+      perror("pthread_create");
+      close(new_fd);
+      free(args);
+    }else{
+      pthread_detach(tid); //automatically clean up thread when its done
     }
-
-    close(new_fd); // parent doesnt need this
-    log_message("Closed connection with client.");
-    // if(!fork()){ //this is the child process
-    // close(sockfd); // child doesn't need the listener
-    // if(send(new_fd, "Hello, World!", 13, 0) == -1) perror("send");
-    // close(new_fd);
-    // exit(0);
-    // }
-    // close(new_fd); // parent doesnt need this
   }
 
   return 0;
